@@ -127,7 +127,7 @@ public class DalvikVM64 extends BaseVM implements VM {
                     return addLocalObject(dvmMethod.toReflectedMethod());
                 }
             }
-        }) ;
+        });
 
         Pointer _GetSuperclass = svcMemory.registerSvc(new Arm64Svc() {
             @Override
@@ -949,7 +949,30 @@ public class DalvikVM64 extends BaseVM implements VM {
         Pointer _CallDoubleMethodV = svcMemory.registerSvc(new Arm64Svc() {
             @Override
             public long handle(Emulator<?> emulator) {
-                throw new UnsupportedOperationException();
+                RegisterContext context = emulator.getContext();
+                UnidbgPointer object = context.getPointerArg(1);
+                UnidbgPointer jmethodID = context.getPointerArg(2);
+                UnidbgPointer va_list = context.getPointerArg(3);
+                if (log.isDebugEnabled()) {
+                    log.debug("CallDoubleMethodV object=" + object + ", jmethodID=" + jmethodID + ", va_list=" + va_list);
+                }
+                DvmObject<?> dvmObject = getObject(object.toIntPeer());
+                DvmClass dvmClass = dvmObject == null ? null : dvmObject.getObjectType();
+                DvmMethod dvmMethod = dvmClass == null ? null : dvmClass.getMethod(jmethodID.toIntPeer());
+                if (dvmMethod == null) {
+                    throw new BackendException();
+                } else {
+                    VaList64 vaList = new VaList64(emulator, DalvikVM64.this, va_list, dvmMethod);
+                    double ret = dvmMethod.callDoubleMethodV(dvmObject, vaList);
+                    if (verbose) {
+                        System.out.printf("JNIEnv->CallDoubleMethodV(%s, %s(%s) => %s) was called from %s%n", dvmObject, dvmMethod.methodName, vaList.formatArgs(), ret, context.getLRPointer());
+                    }
+                    ByteBuffer buffer = ByteBuffer.allocate(16);
+                    buffer.order(ByteOrder.LITTLE_ENDIAN);
+                    buffer.putDouble(ret);
+                    emulator.getBackend().reg_write_vector(Arm64Const.UC_ARM64_REG_Q0, buffer.array());
+                    return context.getLongArg(0);
+                }
             }
         });
 
@@ -3267,9 +3290,9 @@ public class DalvikVM64 extends BaseVM implements VM {
                 }
                 if (log.isDebugEnabled()) {
                     log.debug("GetStringRegion string=" + string + ", value=" + value + ", start=" + start +
-                            ", length=" + length + ", buf" + buf +", lr=" + context.getLRPointer());
+                            ", length=" + length + ", buf" + buf + ", lr=" + context.getLRPointer());
                 }
-                byte[] data = Arrays.copyOfRange(bytes, start, start+length+1);
+                byte[] data = Arrays.copyOfRange(bytes, start, start + length + 1);
                 buf.write(0, data, 0, data.length);
                 return JNI_OK;
             }
@@ -3292,9 +3315,9 @@ public class DalvikVM64 extends BaseVM implements VM {
                 byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
                 if (log.isDebugEnabled()) {
                     log.debug("GetStringUTFRegion string=" + string + ", value=" + value + ", start=" + start +
-                            ", length=" + length + ", buf" + buf +", lr=" + context.getLRPointer());
+                            ", length=" + length + ", buf" + buf + ", lr=" + context.getLRPointer());
                 }
-                byte[] data = Arrays.copyOfRange(bytes, start, start+length+1);
+                byte[] data = Arrays.copyOfRange(bytes, start, start + length + 1);
                 buf.write(0, data, 0, data.length);
                 return JNI_OK;
             }
@@ -3413,7 +3436,7 @@ public class DalvikVM64 extends BaseVM implements VM {
                 }
                 if (dvmGlobalObject != null) {
                     return dvmGlobalObject.weak ? JNIWeakGlobalRefType : JNIGlobalRefType;
-                } else if(dvmLocalObject != null) {
+                } else if (dvmLocalObject != null) {
                     return JNILocalRefType;
                 } else {
                     return JNIInvalidRefType;

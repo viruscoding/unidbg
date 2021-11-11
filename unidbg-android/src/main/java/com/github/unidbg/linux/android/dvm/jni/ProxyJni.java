@@ -326,6 +326,23 @@ class ProxyJni extends JniFunction {
     }
 
     @Override
+    public double callDoubleMethodV(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VaList vaList) {
+        try {
+            Class<?> clazz = classLoader.loadClass(dvmObject.getObjectType().getName());
+            ProxyCall proxyCall = ProxyUtils.findMethod(clazz, dvmMethod, vaList, false, visitor);
+            Object thisObj = dvmObject.getValue();
+            if (thisObj == null) {
+                throw new IllegalStateException("obj is null: " + dvmObject);
+            }
+            Object obj = proxyCall.call(vm, thisObj);
+            return (Double) obj;
+        } catch (ClassNotFoundException | IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException e) {
+            log.warn("callDoubleMethod", e);
+        }
+        return super.callDoubleMethodV(vm, dvmObject, dvmMethod, vaList);
+    }
+
+    @Override
     public byte callByteMethodV(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VaList vaList) {
         try {
             Class<?> clazz = classLoader.loadClass(dvmObject.getObjectType().getName());

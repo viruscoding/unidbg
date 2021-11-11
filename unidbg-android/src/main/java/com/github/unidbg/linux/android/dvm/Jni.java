@@ -64,6 +64,9 @@ public interface Jni {
     double callDoubleMethod(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VarArg varArg);
     double callDoubleMethod(BaseVM vm, DvmObject<?> dvmObject, String signature, VarArg varArg);
 
+    double callDoubleMethodV(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VaList vaList);
+    double callDoubleMethodV(BaseVM vm, DvmObject<?> dvmObject, String signature, VaList vaList);
+
     byte callByteMethodV(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VaList vaList);
     byte callByteMethodV(BaseVM vm, DvmObject<?> dvmObject, String signature, VaList vaList);
 

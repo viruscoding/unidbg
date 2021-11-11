@@ -861,6 +861,16 @@ public abstract class AbstractJni implements Jni {
     }
 
     @Override
+    public double callDoubleMethodV(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VaList vaList) {
+        return callDoubleMethodV(vm, dvmObject, dvmMethod.getSignature(), vaList);
+    }
+
+    @Override
+    public double callDoubleMethodV(BaseVM vm, DvmObject<?> dvmObject, String signature, VaList vaList) {
+        throw new UnsupportedOperationException(signature);
+    }
+
+    @Override
     public void callVoidMethod(BaseVM vm, DvmObject<?> dvmObject, DvmMethod dvmMethod, VarArg varArg) {
         callVoidMethod(vm, dvmObject, dvmMethod.getSignature(), varArg);
     }
@@ -900,10 +910,11 @@ public abstract class AbstractJni implements Jni {
         throw new UnsupportedOperationException(signature);
     }
 
-    public void setStaticObjectField(BaseVM vm, DvmClass dvmClass, DvmField dvmField, DvmObject<?> value){
+    public void setStaticObjectField(BaseVM vm, DvmClass dvmClass, DvmField dvmField, DvmObject<?> value) {
         setStaticObjectField(vm, dvmClass, dvmField.getSignature(), value);
     }
-    public void setStaticObjectField(BaseVM vm, DvmClass dvmClass, String signature, DvmObject<?> value){
+
+    public void setStaticObjectField(BaseVM vm, DvmClass dvmClass, String signature, DvmObject<?> value) {
         throw new UnsupportedOperationException(signature);
     }
 
