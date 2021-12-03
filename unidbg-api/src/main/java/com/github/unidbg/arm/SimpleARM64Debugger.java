@@ -47,6 +47,7 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
         Scanner scanner = new Scanner(System.in);
         String line;
         while ((line = scanner.nextLine()) != null) {
+            line = line.trim();
             try {
                 if ("help".equals(line)) {
                     showHelp(address);
@@ -303,6 +304,7 @@ class SimpleARM64Debugger extends AbstractARMDebugger implements Debugger {
         System.out.println("d(0x): show disassemble at specify address");
         System.out.println("stop: stop emulation");
         System.out.println("run [arg]: run test");
+        System.out.println("gc: Run System.gc()");
 
         if (emulator.getFamily() == Family.iOS && !emulator.isRunning()) {
             System.out.println("dump [class name]: dump objc class");

@@ -42,12 +42,15 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.management.ManagementFactory;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Stack;
 
 /**
  * abstract emulator
@@ -80,6 +83,8 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
     protected final SvcMemory svcMemory;
 
     private final Family family;
+
+    protected final DateFormat dateFormat = new SimpleDateFormat("[HH:mm:ss SSS]");
 
     public AbstractEmulator(boolean is64Bit, String processName, long svcBase, int svcSize, File rootDir, Family family, Collection<BackendFactory> backendFactories) {
         super();
@@ -375,20 +380,26 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
                 Number r1 = backend.reg_read(ArmConst.UC_ARM_REG_R1);
                 return (r0.intValue() & 0xffffffffL) | ((r1.intValue() & 0xffffffffL) << 32);
             }
+        } catch (PopContextException e) {
+            int off = popContext();
+            long pc = backend.reg_read(is32Bit() ? ArmConst.UC_ARM_REG_PC : Arm64Const.UC_ARM64_REG_PC).longValue();
+            if (is32Bit()) {
+                pc &= 0xffffffffL;
+            }
+            try {
+                backend.emu_start(pc + off, until, timeout, 0);
+                if (is64Bit()) {
+                    return backend.reg_read(Arm64Const.UC_ARM64_REG_X0);
+                } else {
+                    Number r0 = backend.reg_read(ArmConst.UC_ARM_REG_R0);
+                    Number r1 = backend.reg_read(ArmConst.UC_ARM_REG_R1);
+                    return (r0.intValue() & 0xffffffffL) | ((r1.intValue() & 0xffffffffL) << 32);
+                }
+            } catch (RuntimeException exception) {
+                return handleEmuException(exception, entry, pointer, start);
+            }
         } catch (RuntimeException e) {
-            if (!entry && e instanceof BackendException && !log.isDebugEnabled()) {
-                log.warn("emulate " + pointer + " failed: sp=" + getStackPointer() + ", offset=" + (System.currentTimeMillis() - start) + "ms", e);
-                return -1;
-            }
-
-            boolean enterDebug = log.isDebugEnabled();
-            if (enterDebug) {
-                e.printStackTrace();
-                attach().debug();
-            } else {
-                log.warn("emulate " + pointer + " exception sp=" + getStackPointer() + ", msg=" + e.getMessage() + ", offset=" + (System.currentTimeMillis() - start) + "ms");
-            }
-            return -1;
+            return handleEmuException(e, entry, pointer, start);
         } finally {
             if (exitHook != null) {
                 Runtime.getRuntime().removeShutdownHook(exitHook);
@@ -399,6 +410,22 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
                 log.debug("emulate " + pointer + " finished sp=" + getStackPointer() + ", offset=" + (System.currentTimeMillis() - start) + "ms");
             }
         }
+    }
+
+    private int handleEmuException(RuntimeException e, boolean entry, Pointer pointer, long start) {
+        if (!entry && e instanceof BackendException && !log.isDebugEnabled()) {
+            log.warn("emulate " + pointer + " failed: sp=" + getStackPointer() + ", offset=" + (System.currentTimeMillis() - start) + "ms", e);
+            return -1;
+        }
+
+        boolean enterDebug = log.isDebugEnabled();
+        if (enterDebug) {
+            e.printStackTrace();
+            attach().debug();
+        } else {
+            log.warn("emulate " + pointer + " exception sp=" + getStackPointer() + ", msg=" + e.getMessage() + ", offset=" + (System.currentTimeMillis() - start) + "ms");
+        }
+        return -1;
     }
 
     protected abstract Pointer getStackPointer();
@@ -478,6 +505,35 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
         getSvcMemory().serialize(out);
         getSyscallHandler().serialize(out);
         getDlfcn().serialize(out);
+    }
+
+    private static class Context {
+        private final long ctx;
+        private final int off;
+        Context(long ctx, int off) {
+            this.ctx = ctx;
+            this.off = off;
+        }
+        void restoreAndFree(Backend backend) {
+            backend.context_restore(ctx);
+            backend.context_free(ctx);
+        }
+    }
+
+    private final Stack<Context> contextStack = new Stack<>();
+
+    @Override
+    public void pushContext(int off) {
+        long context = backend.context_alloc();
+        backend.context_save(context);
+        contextStack.push(new Context(context, off));
+    }
+
+    @Override
+    public int popContext() {
+        Context ctx = contextStack.pop();
+        ctx.restoreAndFree(backend);
+        return ctx.off;
     }
 
 }

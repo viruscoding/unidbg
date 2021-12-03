@@ -1,12 +1,17 @@
 package com.github.unidbg.arm;
 
 import capstone.Capstone;
+import capstone.api.Disassembler;
+import capstone.api.DisassemblerFactory;
+import capstone.api.Instruction;
+import com.alibaba.fastjson.util.IOUtils;
 import com.github.unidbg.AbstractEmulator;
 import com.github.unidbg.Family;
 import com.github.unidbg.Module;
 import com.github.unidbg.arm.backend.Backend;
 import com.github.unidbg.arm.backend.BackendFactory;
 import com.github.unidbg.arm.backend.EventMemHook;
+import com.github.unidbg.arm.backend.UnHook;
 import com.github.unidbg.arm.context.BackendArm64RegisterContext;
 import com.github.unidbg.arm.context.RegisterContext;
 import com.github.unidbg.debugger.Debugger;
@@ -34,6 +39,7 @@ import java.io.PrintStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Collection;
+import java.util.Date;
 
 public abstract class AbstractARM64Emulator<T extends NewFileIO> extends AbstractEmulator<T> implements ARMEmulator<T> {
 
@@ -60,6 +66,13 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
                 }
                 return false;
             }
+            @Override
+            public void onAttach(UnHook unHook) {
+            }
+            @Override
+            public void detach() {
+                throw new UnsupportedOperationException();
+            }
         }, UnicornConst.UC_HOOK_MEM_READ_UNMAPPED | UnicornConst.UC_HOOK_MEM_WRITE_UNMAPPED | UnicornConst.UC_HOOK_MEM_FETCH_UNMAPPED, null);
 
         this.syscallHandler = createSyscallHandler(svcMemory);
@@ -74,14 +87,14 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
         setupTraps();
     }
 
-    private Capstone capstoneArm64Cache;
+    private Disassembler arm64DisassemblerCache;
 
-    private synchronized Capstone createCapstoneArm64() {
-        if (capstoneArm64Cache == null) {
-            this.capstoneArm64Cache = new Capstone(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM);
-            this.capstoneArm64Cache.setDetail(Capstone.CS_OPT_ON);
+    private synchronized Disassembler createArm64Disassembler() {
+        if (arm64DisassemblerCache == null) {
+            this.arm64DisassemblerCache = DisassemblerFactory.createDisassembler(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM);
+            this.arm64DisassemblerCache.setDetail(true);
         }
-        return capstoneArm64Cache;
+        return arm64DisassemblerCache;
     }
 
     protected void setupTraps() {
@@ -134,9 +147,7 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
             io.close();
         }
 
-        if (capstoneArm64Cache != null) {
-            capstoneArm64Cache.close();
-        }
+        IOUtils.close(arm64DisassemblerCache);
     }
 
     @Override
@@ -170,33 +181,36 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
     }
 
     @Override
-    public Capstone.CsInsn[] printAssemble(PrintStream out, long address, int size) {
-        Capstone.CsInsn[] insns = disassemble(address, size, 0);
-        printAssemble(out, insns, address);
+    public Instruction[] printAssemble(PrintStream out, long address, int size, InstructionVisitor visitor) {
+        Instruction[] insns = disassemble(address, size, 0);
+        printAssemble(out, insns, address, visitor);
         return insns;
     }
 
     @Override
-    public Capstone.CsInsn[] disassemble(long address, int size, long count) {
+    public Instruction[] disassemble(long address, int size, long count) {
         byte[] code = backend.mem_read(address, size);
-        return createCapstoneArm64().disasm(code, address, count);
+        return createArm64Disassembler().disasm(code, address, count);
     }
 
     @Override
-    public Capstone.CsInsn[] disassemble(long address, byte[] code, boolean thumb, long count) {
+    public Instruction[] disassemble(long address, byte[] code, boolean thumb, long count) {
         if (thumb) {
             throw new IllegalStateException();
         }
-        return createCapstoneArm64().disasm(code, address, count);
+        return createArm64Disassembler().disasm(code, address, count);
     }
 
-    private void printAssemble(PrintStream out, Capstone.CsInsn[] insns, long address) {
+    private void printAssemble(PrintStream out, Instruction[] insns, long address, InstructionVisitor visitor) {
         StringBuilder sb = new StringBuilder();
-        for (Capstone.CsInsn ins : insns) {
-            sb.append("### Trace Instruction ");
+        for (Instruction ins : insns) {
+            sb.append(dateFormat.format(new Date())).append(" Trace Instruction ");
             sb.append(ARM.assembleDetail(this, ins, address, false));
+            if (visitor != null) {
+                visitor.visit(sb, ins);
+            }
             sb.append('\n');
-            address += ins.size;
+            address += ins.getSize();
         }
         out.print(sb);
     }

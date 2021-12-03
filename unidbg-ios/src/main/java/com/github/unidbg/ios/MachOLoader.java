@@ -1,5 +1,6 @@
 package com.github.unidbg.ios;
 
+import com.github.unidbg.AbstractEmulator;
 import com.github.unidbg.Alignment;
 import com.github.unidbg.Emulator;
 import com.github.unidbg.LibraryResolver;
@@ -21,6 +22,7 @@ import com.github.unidbg.file.ios.DarwinFileIO;
 import com.github.unidbg.file.ios.IOConstants;
 import com.github.unidbg.hook.HookListener;
 import com.github.unidbg.ios.patch.LibDispatchPatcher;
+import com.github.unidbg.ios.patch.LibDyldPatcher;
 import com.github.unidbg.ios.struct.kernel.Pthread;
 import com.github.unidbg.ios.struct.kernel.Pthread32;
 import com.github.unidbg.ios.struct.kernel.Pthread64;
@@ -39,6 +41,7 @@ import com.github.unidbg.spi.AbstractLoader;
 import com.github.unidbg.spi.LibraryFile;
 import com.github.unidbg.spi.Loader;
 import com.github.unidbg.unix.IO;
+import com.github.unidbg.unix.Thread;
 import com.github.unidbg.unix.UnixSyscallHandler;
 import com.github.unidbg.utils.Inspector;
 import com.sun.jna.Pointer;
@@ -169,6 +172,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         vars.setPointer(2L * emulator.getPointerSize(), _NSGetArgv);
         vars.setPointer(3L * emulator.getPointerSize(), _NSGetEnviron);
         vars.setPointer(4L * emulator.getPointerSize(), _NSGetProgname);
+
+        addModuleListener(new LibDyldPatcher(_NSGetArgc, _NSGetArgv, _NSGetEnviron, _NSGetProgname));
 
         final UnidbgPointer thread = allocateStack(UnidbgStructure.calculateSize(emulator.is64Bit() ? Pthread64.class : Pthread32.class)); // reserve space for pthread_internal_t
         Pthread pthread = Pthread.create(emulator, thread);
@@ -1522,6 +1527,9 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
     @Override
     public Module dlopen(String path, boolean callInit) {
+        if ("/usr/lib/libSystem.dylib".equals(path)) {
+            path = "/usr/lib/libSystem.B.dylib";
+        }
         MachOModule loaded = modules.get(FilenameUtils.getName(path));
         if (loaded != null) {
             loaded.addReferenceCount();
@@ -1623,12 +1631,22 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
     @Override
     public void runThread(int threadId, long timeout) {
-        throw new UnsupportedOperationException();
+        try {
+            emulator.setTimeout(timeout);
+            Thread thread = syscallHandler.threadMap.get(threadId);
+            if (thread != null) {
+                thread.runThread(emulator, 0L, timeout);
+            } else {
+                throw new IllegalStateException("thread: " + threadId + " not exits");
+            }
+        } finally {
+            emulator.setTimeout(AbstractEmulator.DEFAULT_TIMEOUT);
+        }
     }
 
     @Override
     public void runLastThread(long timeout) {
-        throw new UnsupportedOperationException();
+        runThread(syscallHandler.lastThread, timeout);
     }
 
     @Override

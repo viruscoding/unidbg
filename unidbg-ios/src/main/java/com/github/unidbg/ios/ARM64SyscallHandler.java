@@ -2,6 +2,7 @@ package com.github.unidbg.ios;
 
 import com.github.unidbg.AbstractEmulator;
 import com.github.unidbg.Emulator;
+import com.github.unidbg.PopContextException;
 import com.github.unidbg.StopEmulatorException;
 import com.github.unidbg.Svc;
 import com.github.unidbg.arm.ARM;
@@ -24,6 +25,7 @@ import com.github.unidbg.ios.file.TcpSocket;
 import com.github.unidbg.ios.file.UdpSocket;
 import com.github.unidbg.ios.struct.attr.AttrList;
 import com.github.unidbg.ios.struct.kernel.AslServerMessageRequest;
+import com.github.unidbg.ios.struct.kernel.ClockGetTimeReply;
 import com.github.unidbg.ios.struct.kernel.HostGetClockServiceReply;
 import com.github.unidbg.ios.struct.kernel.HostGetClockServiceRequest;
 import com.github.unidbg.ios.struct.kernel.HostInfoReply;
@@ -66,6 +68,8 @@ import com.github.unidbg.ios.struct.kernel.TaskInfoRequest;
 import com.github.unidbg.ios.struct.kernel.TaskSetExceptionPortsReply;
 import com.github.unidbg.ios.struct.kernel.TaskSetExceptionPortsRequest;
 import com.github.unidbg.ios.struct.kernel.TaskThreadsReply64;
+import com.github.unidbg.ios.struct.kernel.ThreadBasicInfoReply;
+import com.github.unidbg.ios.struct.kernel.ThreadInfoRequest;
 import com.github.unidbg.ios.struct.kernel.VmCopy64Request;
 import com.github.unidbg.ios.struct.kernel.VmCopyReply;
 import com.github.unidbg.ios.struct.kernel.VmReadOverwriteReply;
@@ -78,6 +82,7 @@ import com.github.unidbg.ios.struct.sysctl.IfMsgHeader;
 import com.github.unidbg.ios.struct.sysctl.KInfoProc64;
 import com.github.unidbg.ios.struct.sysctl.SockAddrDL;
 import com.github.unidbg.ios.struct.sysctl.TaskDyldInfo;
+import com.github.unidbg.ios.thread.DarwinThread;
 import com.github.unidbg.memory.MemoryBlock;
 import com.github.unidbg.memory.MemoryMap;
 import com.github.unidbg.memory.SvcMemory;
@@ -139,11 +144,21 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         String syscall = null;
         Throwable exception = null;
         try {
-            if (swi == 0 && NR == Svc.CALLBACK_SYSCALL_NUMBER && backend.reg_read(Arm64Const.UC_ARM64_REG_X8).intValue() == 0) { // callback
+            if (swi == 0 && NR == Svc.POST_CALLBACK_SYSCALL_NUMBER && backend.reg_read(Arm64Const.UC_ARM64_REG_X8).intValue() == 0) { // postCallback
                 int number = backend.reg_read(Arm64Const.UC_ARM64_REG_X4).intValue();
                 Svc svc = svcMemory.getSvc(number);
                 if (svc != null) {
-                    svc.handleCallback(emulator);
+                    svc.handlePostCallback(emulator);
+                    return;
+                }
+                backend.emu_stop();
+                throw new IllegalStateException("svc number: " + swi);
+            }
+            if (swi == 0 && NR == Svc.PRE_CALLBACK_SYSCALL_NUMBER && backend.reg_read(Arm64Const.UC_ARM64_REG_X8).intValue() == 0) { // preCallback
+                int number = backend.reg_read(Arm64Const.UC_ARM64_REG_X4).intValue();
+                Svc svc = svcMemory.getSvc(number);
+                if (svc != null) {
+                    svc.handlePreCallback(emulator);
                     return;
                 }
                 backend.emu_stop();
@@ -232,6 +247,9 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                     return;
                 case -36: // _semaphore_wait_trap
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, _semaphore_wait_trap(emulator));
+                    return;
+                case -38: // semaphore_timedwait_trap
+                    backend.reg_write(Arm64Const.UC_ARM64_REG_X0, semaphore_timedwait_trap(emulator));
                     return;
                 case -41: // _xpc_mach_port_guard
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, _kernelrpc_mach_port_guard_trap(emulator));
@@ -352,6 +370,9 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                 case 138:
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, utimes(emulator));
                     return;
+                case 169:
+                    backend.reg_write(Arm64Const.UC_ARM64_REG_X0, csops(emulator));
+                    return;
                 case 194:
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, getrlimit(emulator));
                     return;
@@ -416,7 +437,7 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, issetugid());
                     return;
                 case 334:
-                    backend.reg_write(Arm64Const.UC_ARM64_REG_X0, semwait_signal_nocancel());
+                    backend.reg_write(Arm64Const.UC_ARM64_REG_X0, semwait_signal(emulator));
                     return;
                 case 336:
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, proc_info(emulator));
@@ -497,6 +518,9 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         } catch (StopEmulatorException e) {
             backend.emu_stop();
             return;
+        } catch (PopContextException e) {
+            backend.emu_stop();
+            throw e;
         } catch (Throwable e) {
             backend.emu_stop();
             exception = e;
@@ -509,6 +533,47 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
 
         if (exception instanceof RuntimeException) {
             throw (RuntimeException) exception;
+        }
+    }
+
+    private static final int CS_OPS_STATUS = 0; /* return status */
+    private static final int CS_HARD = 0x0000100; /* don't load invalid pages */
+    private static final int CS_RESTRICT = 0x0000800; /* tell dyld to treat restricted */
+    private static final int CS_ENFORCEMENT = 0x0001000; /* require enforcement */
+    private static final int CS_REQUIRE_LV = 0x0002000; /* require library validation */
+    private static final int CS_ENTITLEMENTS_VALIDATED = 0x0004000; /* code signature permits restricted entitlements */
+    private static final int CS_DYLD_PLATFORM = 0x2000000; /* dyld used to load this is a platform binary */
+    private static final int CS_PLATFORM_BINARY = 0x4000000; /* this is a platform binary */
+    private static final int CS_SIGNED = 0x20000000; /* process has a signature (may have gone invalid) */
+
+    private static final int CS_OPS_CDHASH = 5; /* get code directory hash */
+
+    private long csops(Emulator<DarwinFileIO> emulator) {
+        RegisterContext context = emulator.getContext();
+        int pid = context.getIntArg(0);
+        int op = context.getIntArg(1);
+        Pointer addr = context.getPointerArg(2);
+        int length = context.getIntArg(3);
+        if (log.isDebugEnabled()) {
+            log.debug("csops pid=" + pid + ", op=" + op + ", addr=" + addr + ", length=" + length);
+        }
+        if (op == CS_OPS_STATUS) {
+            addr.setInt(0, CS_HARD | CS_RESTRICT | CS_ENFORCEMENT | CS_REQUIRE_LV | CS_ENTITLEMENTS_VALIDATED | CS_DYLD_PLATFORM | CS_PLATFORM_BINARY | CS_SIGNED);
+            return 0;
+        } else if (op == CS_OPS_CDHASH) {
+            byte[] cdhash = new byte[length];
+            for (int i = 0; i < length; i++) {
+                cdhash[i] = (byte) (i + 0x10);
+            }
+            addr.write(0, cdhash, 0, length);
+            return 0;
+        } else {
+            log.info("csops pid=" + pid + ", op=" + op + ", addr=" + addr + ", length=" + length);
+            Log log = LogFactory.getLog(AbstractEmulator.class);
+            if (log.isDebugEnabled()) {
+                emulator.attach().debug();
+            }
+            return -1;
         }
     }
 
@@ -717,8 +782,23 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         return 0;
     }
 
+    private long semaphore_timedwait_trap(Emulator<?> emulator) {
+        RegisterContext context = emulator.getContext();
+        int port = context.getIntArg(0);
+        log.info("semaphore_timedwait_trap port=" + port);
+        Log log = ARM64SyscallHandler.log;
+        if (!log.isDebugEnabled()) {
+            log = LogFactory.getLog(AbstractEmulator.class);
+        }
+        if (log.isDebugEnabled()) {
+            createBreaker(emulator).debug();
+        }
+        return 0;
+    }
+
     private long _semaphore_wait_trap(Emulator<?> emulator) {
-        int port = emulator.getContext().getIntArg(0);
+        RegisterContext context = emulator.getContext();
+        int port = context.getIntArg(0);
         log.info("_semaphore_wait_trap port=" + port);
         Log log = ARM64SyscallHandler.log;
         if (!log.isDebugEnabled()) {
@@ -841,7 +921,12 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
     private int psynch_cvwait(Emulator<?> emulator) {
         // TODO: implement
         log.info("psynch_cvwait LR=" + emulator.getContext().getLRPointer());
-        return 0;
+        Log log = LogFactory.getLog(AbstractEmulator.class);
+        if (log.isDebugEnabled()) {
+            emulator.attach().debug();
+        }
+        emulator.getMemory().setErrno(UnixEmulator.EINTR);
+        return -1;
     }
 
     private int shm_open(Emulator<?> emulator) {
@@ -1193,6 +1278,7 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
     private static final int PROC_SELFSET_THREADNAME = 2;
 
     private static final int PROC_INFO_CALL_PIDINFO = 0x2;
+    private static final int PROC_PIDPATHINFO = 11;
     private static final int PROC_PIDT_SHORTBSDINFO = 13;
 
     private int proc_info(Emulator<?> emulator) {
@@ -1236,16 +1322,44 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                 log.debug(msg + ", info=" + info);
             }
             return info.size();
+        } else if (PROC_INFO_CALL_PIDINFO == callNum && PROC_PIDPATHINFO == flavor && executableBundlePath != null) {
+            byte[] data = executableBundlePath.getBytes(StandardCharsets.UTF_8);
+            if (bufferSize < data.length + 1) {
+                throw new UnsupportedOperationException();
+            }
+            buffer.write(0, Arrays.copyOf(data, data.length + 1), 0, data.length + 1);
+            return 0;
         } else {
+            Log log = LogFactory.getLog(AbstractEmulator.class);
+            if (log.isDebugEnabled()) {
+                emulator.attach().debug();
+            }
             log.info(msg);
             return -1;
         }
     }
 
-    private int semwait_signal_nocancel() {
-        // TODO: implement
-        log.info("semwait_signal_nocancel");
-        return 0;
+    protected int semwait_signal(Emulator<?> emulator) {
+        RegisterContext context = emulator.getContext();
+        int cond_sem = context.getIntArg(0);
+        int mutex_sem = context.getIntArg(1);
+        int timeout = context.getIntArg(2);
+        int relative = context.getIntArg(3);
+        long tv_sec = context.getLongArg(4);
+        int tv_nsec = context.getIntArg(5);
+        log.info("semwait_signal cond_sem=" + cond_sem + ", mutex_sem=" + mutex_sem + ", timeout=" + timeout + ", relative=" + relative + ", tv_sec=" + tv_sec + ", tv_nsec=" + tv_nsec);
+        Log log = LogFactory.getLog(AbstractEmulator.class);
+        if (log.isDebugEnabled()) {
+            emulator.attach().debug();
+        }
+        try {
+            Thread.sleep(tv_sec * 1000L + tv_nsec / 1000L, tv_nsec % 1000);
+            emulator.getMemory().setErrno(ETIMEDOUT);
+            return -1;
+        } catch (InterruptedException e) {
+            emulator.getMemory().setErrno(UnixEmulator.EINVAL);
+            return -1;
+        }
     }
 
     private int sandbox_ms(Emulator<?> emulator) {
@@ -1280,11 +1394,13 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         throw new BackendException("statfs64 path=" + path + ", buf=" + buf);
     }
 
+    private int threadId;
+
     private long bsdthread_create(Emulator<?> emulator) {
         RegisterContext context = emulator.getContext();
-        Pointer start_routine = context.getPointerArg(0);
-        Pointer arg = context.getPointerArg(1);
-        Pointer stack = context.getPointerArg(2);
+        UnidbgPointer start_routine = context.getPointerArg(0);
+        UnidbgPointer arg = context.getPointerArg(1);
+        UnidbgPointer stack = context.getPointerArg(2);
         UnidbgPointer thread = context.getPointerArg(3);
         int flags = context.getIntArg(4);
         if (thread == null) {
@@ -1295,7 +1411,14 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         pThread.self = thread;
         pThread.machThreadSelf = UnidbgPointer.pointer(emulator, STATIC_PORT);
         pThread.pack();
-        log.info("bsdthread_create start_routine=" + start_routine + ", arg=" + arg + ", stack=" + stack + ", thread=" + thread + ", flags=0x" + Integer.toHexString(flags));
+        int threadId = ++this.threadId;
+        log.info("bsdthread_create start_routine=" + start_routine + ", arg=" + arg + ", stack=" + stack + ", thread=" + thread + ", threadId=" + threadId + ", flags=0x" + Integer.toHexString(flags));
+        Log log = LogFactory.getLog(AbstractEmulator.class);
+        if (log.isDebugEnabled()) {
+            emulator.attach().debug();
+        }
+        lastThread = threadId;
+        threadMap.put(threadId, new DarwinThread(emulator, start_routine, arg));
         return thread.peer;
     }
 
@@ -2728,6 +2851,32 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                 }
                 return MACH_MSG_SUCCESS;
             }
+            case 1000: { // clock_get_time
+                ClockGetTimeReply reply = new ClockGetTimeReply(request);
+                reply.unpack();
+
+                header.setMsgBits(false);
+                header.msgh_size = header.size() + reply.size();
+                header.msgh_remote_port = header.msgh_local_port;
+                header.msgh_local_port = 0;
+                header.msgh_id += 100; // reply Id always equals reqId+100
+                header.pack();
+
+                long currentTimeMillis = System.currentTimeMillis();
+                long nanoTime = System.nanoTime();
+                long tv_sec = currentTimeMillis / 1000;
+                long tv_usec = (currentTimeMillis % 1000) * 1000 + nanoTime % 1000;
+
+                reply.retCode = 0;
+                reply.tv_sec = (int) tv_sec;
+                reply.tv_nsec = (int) tv_usec;
+                reply.pack();
+
+                if (log.isDebugEnabled()) {
+                    log.debug("clock_get_time reply=" + reply);
+                }
+                return MACH_MSG_SUCCESS;
+            }
             case 4808: // vm_read_overwrite
             {
                 VmReadOverwriteRequest args = new VmReadOverwriteRequest(request);
@@ -2756,6 +2905,50 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
 
                 if (log.isDebugEnabled()) {
                     log.debug("vm_read_overwrite reply=" + reply + ", header=" + header);
+                }
+                return MACH_MSG_SUCCESS;
+            }
+            case 3612: { // _thread_info
+                ThreadInfoRequest args = new ThreadInfoRequest(request);
+                args.unpack();
+                if (log.isDebugEnabled()) {
+                    log.debug("_thread_info args=" + args);
+                }
+
+                final int THREAD_BASIC_INFO = 3;
+                if (args.flavor != THREAD_BASIC_INFO) {
+                    throw new UnsupportedOperationException();
+                }
+
+                ThreadBasicInfoReply reply = new ThreadBasicInfoReply(request);
+                reply.unpack();
+
+                header.setMsgBits(false);
+                header.msgh_size = header.size() + reply.size();
+                header.msgh_remote_port = header.msgh_local_port;
+                header.msgh_local_port = 0;
+                header.msgh_id += 100; // reply Id always equals reqId+100
+                header.pack();
+
+                final int THREAD_BASIC_INFO_COUNT = 10;
+                final int POLICY_TIMESHARE = 1;
+                final int TH_STATE_RUNNING = 1;
+                reply.retCode = 0;
+                reply.outCnt = THREAD_BASIC_INFO_COUNT;
+                reply.info.user_time.tv_sec = 0;
+                reply.info.user_time.tv_usec = 177546;
+                reply.info.system_time.tv_sec = 0;
+                reply.info.system_time.tv_usec = 0;
+                reply.info.cpu_usage = 343;
+                reply.info.policy = POLICY_TIMESHARE;
+                reply.info.run_state = TH_STATE_RUNNING;
+                reply.info.flags = 0;
+                reply.info.suspend_count = 0;
+                reply.info.sleep_time = 0;
+                reply.pack();
+
+                if (log.isDebugEnabled()) {
+                    log.debug("_thread_info reply=" + reply);
                 }
                 return MACH_MSG_SUCCESS;
             }
@@ -2871,6 +3064,15 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         long tv_sec = currentTimeMillis / 1000;
         long tv_usec = (currentTimeMillis % 1000) * 1000 + nanoTime % 1000;
         context.setXLong(1, tv_usec);
+
+        Pointer tv = context.getPointerArg(0);
+        if (tv != null) {
+            TimeVal64 timeVal = new TimeVal64(tv);
+            timeVal.tv_sec = tv_sec;
+            timeVal.tv_usec = tv_usec;
+            timeVal.pack();
+        }
+
         if (log.isDebugEnabled()) {
             log.debug("gettimeofday tv_sec=" + tv_sec + ", tv_usec=" + tv_usec);
         }

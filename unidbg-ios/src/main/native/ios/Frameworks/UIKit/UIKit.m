@@ -8,6 +8,13 @@ static NSString *systemVersion = @"7.1";
 static NSString *model = @"iPhone";
 static NSString *name = @"iPhone5S";
 static NSString *identifierForVendor = @"00000000-0000-0000-0000-000000000000";
+const NSOperatingSystemVersion g_systemVersion = { 7, 1, 2 };
+
+@implementation NSProcessInfo (Foundation)
+- (NSOperatingSystemVersion) operatingSystemVersion {
+  return g_systemVersion;
+}
+@end
 
 int UIApplicationMain(int argc, char *argv[], NSString *principalClassName, NSString *delegateClassName) {
   if(delegateClassName) {
@@ -84,6 +91,9 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
     return g_frame;
 }
 - (CGFloat)scale {
+    return 1.0;
+}
+- (CGFloat)nativeScale {
     return 1.0;
 }
 @end
@@ -233,6 +243,9 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
   self.ignoringInteractionEvents = true;
 }
 
+- (void)registerForRemoteNotifications {
+}
+
 @end
 
 @implementation UIDevice
@@ -288,11 +301,43 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
 }
 @end
 
+@implementation NSTimerInvocation
++ (NSTimerInvocation *)invocationWithBlock: (void (^)(NSTimer *timer))block {
+  NSTimerInvocation *invocation = [NSTimerInvocation new];
+  invocation.block = block;
+  return invocation;
+}
+- (void) callWithTimer: (NSTimer *) timer {
+  self.block(timer);
+}
+@end
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wobjc-protocol-method-implementation"
+@implementation NSTimer (Foundation)
++ (NSTimer *)timerWithTimeInterval:(NSTimeInterval)interval repeats:(BOOL)repeats block:(void (^)(NSTimer *timer))block {
+  NSTimerInvocation *timerInvocation = [NSTimerInvocation invocationWithBlock: block];
+  NSMethodSignature *signature = [[NSTimer class] instanceMethodSignatureForSelector: @selector(callWithInvocation:)];
+  NSInvocation *invocation = [NSInvocation invocationWithMethodSignature: signature];
+  invocation.target = self;
+  [invocation setArgument: &timerInvocation atIndex: 0];
+  [invocation retainArguments];
+  return [NSTimer timerWithTimeInterval:interval invocation:invocation repeats:repeats];
+}
+- (void) callWithInvocation: (NSTimerInvocation *) invocation {
+  [invocation callWithTimer: self];
+}
+@end
+
 @implementation NSURLSession (CFNetwork)
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration {
+  return [NSURLSession new];
+}
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration delegate:(id)delegate delegateQueue:(NSOperationQueue *)queue {
   return [NSURLSession new];
 }
 @end
+#pragma clang diagnostic pop
 
 @implementation UIViewController
 @end
@@ -336,6 +381,12 @@ const CGRect g_frame = { 0, 0, 768, 1024 };
 }
 - (void)registerImage:(UIImage *)image withTraitCollection:(UITraitCollection *)traitCollection {
 }
+@end
+
+@implementation UICollectionReusableView
+@end
+
+@implementation UICollectionViewCell
 @end
 
 void UIGraphicsBeginImageContextWithOptions(CGSize size, BOOL opaque, CGFloat scale) {

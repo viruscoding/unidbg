@@ -131,4 +131,7 @@ public interface Emulator<T extends NewFileIO> extends Closeable, Disassembler, 
 
     Unwinder getUnwinder();
 
+    void pushContext(int off);
+    int popContext();
+
 }

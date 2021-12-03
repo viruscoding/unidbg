@@ -23,6 +23,7 @@
 #include <sys/param.h>
 #include <sys/ucred.h>
 #include <sys/mount.h>
+#include <dispatch/dispatch.h>
 
 #define RTM_IFINFO	0xe
 
@@ -218,6 +219,24 @@ static void test_pthread() {
   printf("pthread[%p] ret=%d\n", thread, ret);
 }
 
+static void *start_routine(void *arg) {
+  void *ret = (void *)&test_pthread;
+  printf("test_pthread_join start_routine arg=%p, ret=%p\n", arg, ret);
+  while(true) {
+    sleep(88);
+  }
+  return ret;
+}
+
+static void test_pthread_join() {
+  pthread_t thread = 0;
+  void *arg = &thread;
+  int ret = pthread_create(&thread, NULL, start_routine, arg);
+  void *value = NULL;
+  int join_ret = pthread_join(thread, &value);
+  printf("test_pthread_join arg=%p, ret=%d, thread=0x%lx, join_ret=%d, value=%p\n", arg, ret, (long) thread, join_ret, value);
+}
+
 static void test_file() {
   const char *file = "/tmp/test_file.txt";
   int fd = open(file, O_RDWR | O_CREAT);
@@ -383,6 +402,26 @@ static void test_lr() {
   free(buf);
 }
 
+static void test_sleep() {
+  int ret = sleep(2);
+  printf("test_sleep ret=%d\n", ret);
+}
+
+static void test_dispatch() {
+  int QOS_CLASS_UTILITY = 0x11;
+  dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+  printf("Before test_dispatch queue=%p\n", queue);
+  dispatch_sync(queue, ^{
+    printf("test_dispatch dispatch_sync queue=%p\n", queue);
+  });
+  dispatch_group_t group =  dispatch_group_create();
+  dispatch_group_async(group, queue, ^{
+    printf("test_dispatch dispatch_group_async group=%p, queue=%p\n", group, queue);
+  });
+  long ret = dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+  printf("test_dispatch group=%p, queue=%p, ret=%ld\n", group, queue, ret);
+}
+
 void do_test() {
   test_printf();
   test_sysctl_CTL_UNSPEC();
@@ -409,6 +448,9 @@ void do_test() {
   test_host_statistics();
   test_getfsstat();
   test_lr();
+  test_pthread_join();
+  test_sleep();
+  test_dispatch();
 }
 
 __attribute__((constructor))
