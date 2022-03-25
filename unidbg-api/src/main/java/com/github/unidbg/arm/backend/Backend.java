@@ -2,7 +2,6 @@ package com.github.unidbg.arm.backend;
 
 import com.github.unidbg.debugger.BreakPoint;
 import com.github.unidbg.debugger.BreakPointCallback;
-import unicorn.Unicorn;
 
 public interface Backend {
 
@@ -59,5 +58,7 @@ public interface Backend {
     void context_free(long context);
 
     int getPageSize();
+
+    void registerEmuCountHook(long emu_count);
 
 }

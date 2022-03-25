@@ -1,6 +1,5 @@
 package com.github.unidbg.arm.backend.kvm;
 
-import capstone.Capstone;
 import capstone.api.Disassembler;
 import capstone.api.DisassemblerFactory;
 import capstone.api.Instruction;
@@ -68,7 +67,7 @@ public class KvmBackend64 extends KvmBackend {
 
     private synchronized Disassembler createDisassembler() {
         if (disassembler == null) {
-            this.disassembler = DisassemblerFactory.createDisassembler(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM);
+            this.disassembler = DisassemblerFactory.createArm64Disassembler();
             this.disassembler.setDetail(true);
         }
         return disassembler;
@@ -96,7 +95,7 @@ public class KvmBackend64 extends KvmBackend {
             case 0x58: {
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getReg(), 0x0L);
+                reg_write(value.getUnicornReg(), 0x0L);
                 kvm.reg_set_elr_el1(elr + 4);
                 return true;
             }
@@ -108,7 +107,7 @@ public class KvmBackend64 extends KvmBackend {
             case 0x90: {
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getReg(), 0x0);
+                reg_write(value.getUnicornReg(), 0x0);
                 kvm.reg_set_elr_el1(elr + 4);
                 return true;
             }
@@ -118,7 +117,7 @@ public class KvmBackend64 extends KvmBackend {
             case 0x36: { // uint8_t number of logical CPUs (hw.logicalcpu_max)
                 Operand operand = op[0];
                 OpValue value = operand.getValue();
-                reg_write(value.getReg(), 1);
+                reg_write(value.getUnicornReg(), 1);
                 kvm.reg_set_elr_el1(elr + 4);
                 return true;
             }

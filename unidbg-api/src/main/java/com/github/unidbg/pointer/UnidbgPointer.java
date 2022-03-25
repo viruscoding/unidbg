@@ -4,7 +4,6 @@ import com.github.unidbg.Emulator;
 import com.github.unidbg.InvalidMemoryAccessException;
 import com.github.unidbg.Module;
 import com.github.unidbg.arm.backend.Backend;
-import com.github.unidbg.hook.BaseHook;
 import com.github.unidbg.memory.Memory;
 import com.github.unidbg.memory.MemoryMap;
 import com.sun.jna.NativeLong;
@@ -29,6 +28,14 @@ public class UnidbgPointer extends Pointer {
     public final long peer;
     private final int pointerSize;
 
+    public static long nativeValue(Pointer ptr) {
+        if (ptr == null) {
+            return 0L;
+        }
+        UnidbgPointer up = (UnidbgPointer) ptr;
+        return up.emulator.is64Bit() ? up.peer : up.toUIntPeer();
+    }
+
     public long toUIntPeer() {
         return peer & 0xffffffffL;
     }
@@ -39,10 +46,10 @@ public class UnidbgPointer extends Pointer {
 
     private final MemoryWriteListener listener;
 
-    UnidbgPointer(byte[] data) {
+    UnidbgPointer(Emulator<?> emulator, byte[] data) {
         super(0);
 
-        this.emulator = null;
+        this.emulator = emulator;
         this.backend = data == null ? null : new ByteArrayBackend(data);
         this.peer = 0L;
         this.pointerSize = 0;
@@ -79,11 +86,12 @@ public class UnidbgPointer extends Pointer {
     }
 
     public static UnidbgPointer pointer(Emulator<?> emulator, long addr) {
-        return addr == 0 ? null : new UnidbgPointer(emulator, addr, emulator.getPointerSize());
+        long peer = emulator.is64Bit() ? addr : addr & 0xffffffffL;
+        return peer == 0 ? null : new UnidbgPointer(emulator, peer, emulator.getPointerSize());
     }
 
     public static UnidbgPointer pointer(Emulator<?> emulator, Number number) {
-        return pointer(emulator, BaseHook.numberToAddress(emulator, number));
+        return pointer(emulator, number.longValue());
     }
 
     public static UnidbgPointer register(Emulator<?> emulator, int reg) {

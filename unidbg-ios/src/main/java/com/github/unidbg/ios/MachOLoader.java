@@ -1,6 +1,5 @@
 package com.github.unidbg.ios;
 
-import com.github.unidbg.AbstractEmulator;
 import com.github.unidbg.Alignment;
 import com.github.unidbg.Emulator;
 import com.github.unidbg.LibraryResolver;
@@ -40,8 +39,8 @@ import com.github.unidbg.pointer.UnidbgStructure;
 import com.github.unidbg.spi.AbstractLoader;
 import com.github.unidbg.spi.LibraryFile;
 import com.github.unidbg.spi.Loader;
+import com.github.unidbg.thread.Task;
 import com.github.unidbg.unix.IO;
-import com.github.unidbg.unix.Thread;
 import com.github.unidbg.unix.UnixSyscallHandler;
 import com.github.unidbg.utils.Inspector;
 import com.sun.jna.Pointer;
@@ -127,9 +126,9 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         this.setErrno(0);
     }
 
-    private static final long __TSD_THREAD_SELF = 0;
-    private static final long __TSD_ERRNO = 1;
-    private static final long __TSD_MIG_REPLY = 2;
+    public static final long __TSD_THREAD_SELF = 0;
+    public static final long __TSD_ERRNO = 1;
+    public static final long __TSD_MIG_REPLY = 2;
 //    private static final int __PTK_FRAMEWORK_OBJC_KEY5 = 0x2d;
 
     private void initializeTSD(String[] envs) {
@@ -175,7 +174,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
 
         addModuleListener(new LibDyldPatcher(_NSGetArgc, _NSGetArgv, _NSGetEnviron, _NSGetProgname));
 
-        final UnidbgPointer thread = allocateStack(UnidbgStructure.calculateSize(emulator.is64Bit() ? Pthread64.class : Pthread32.class)); // reserve space for pthread_internal_t
+        final Pointer thread = allocateStack(UnidbgStructure.calculateSize(emulator.is64Bit() ? Pthread64.class : Pthread32.class)); // reserve space for pthread_internal_t
         Pthread pthread = Pthread.create(emulator, thread);
 
         /* 0xa4必须固定，否则初始化objc会失败 */
@@ -732,7 +731,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         MachOModule module = new MachOModule(machO, dyId, loadBase, loadSize, new HashMap<String, Module>(neededLibraries), regions,
                 symtabCommand, dysymtabCommand, buffer, lazyLoadNeededList, upwardLibraries, exportModules, dylibPath, emulator,
                 dyldInfoCommand, null, null, vars, machHeader, isExecutable, this, hookListeners, ordinalList,
-                fEHFrameSection, fUnwindInfoSection, objcSections, segments.toArray(new Segment[0]));
+                fEHFrameSection, fUnwindInfoSection, objcSections, segments.toArray(new Segment[0]), libraryFile);
         processRebase(log, module);
         if (isExecutable) {
             setExecuteModule(module);
@@ -1499,8 +1498,20 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
     }
 
+    private int lastErrno;
+
+    @Override
+    public int getLastErrno() {
+        return lastErrno;
+    }
+
     @Override
     public void setErrno(int errno) {
+        this.lastErrno = errno;
+        Task task = emulator.get(Task.TASK_KEY);
+        if (task != null && task.setErrno(emulator, errno)) {
+            return;
+        }
         if (this.errno != null) {
             this.errno.setInt(0, errno);
         }
@@ -1629,31 +1640,6 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         return maxSizeOfDylib;
     }
 
-    @Override
-    public void runThread(int threadId, long timeout) {
-        try {
-            emulator.setTimeout(timeout);
-            Thread thread = syscallHandler.threadMap.get(threadId);
-            if (thread != null) {
-                thread.runThread(emulator, 0L, timeout);
-            } else {
-                throw new IllegalStateException("thread: " + threadId + " not exits");
-            }
-        } finally {
-            emulator.setTimeout(AbstractEmulator.DEFAULT_TIMEOUT);
-        }
-    }
-
-    @Override
-    public void runLastThread(long timeout) {
-        runThread(syscallHandler.lastThread, timeout);
-    }
-
-    @Override
-    public boolean hasThread(int threadId) {
-        throw new UnsupportedOperationException();
-    }
-
     final List<UnidbgPointer> addImageCallbacks = new ArrayList<>();
     final List<UnidbgPointer> boundHandlers = new ArrayList<>();
     final List<UnidbgPointer> initializedHandlers = new ArrayList<>();
@@ -1663,8 +1649,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             int elementSize = UnidbgStructure.calculateSize(DyldImageInfo64.class);
             Pointer pointer = emulator.getSvcMemory().allocate(elementSize, "notifySingle");
             DyldImageInfo64 info = new DyldImageInfo64(pointer);
-            info.imageFilePath = module.createPathMemory(emulator.getSvcMemory());
-            info.imageLoadAddress = UnidbgPointer.pointer(emulator, module.machHeader);
+            info.imageFilePath = UnidbgPointer.nativeValue(module.createPathMemory(emulator.getSvcMemory()));
+            info.imageLoadAddress = module.machHeader;
             info.imageFileModDate = 0;
             info.pack();
             return info;
@@ -1672,8 +1658,8 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
             int elementSize = UnidbgStructure.calculateSize(DyldImageInfo32.class);
             Pointer pointer = emulator.getSvcMemory().allocate(elementSize, "notifySingle");
             DyldImageInfo32 info = new DyldImageInfo32(pointer);
-            info.imageFilePath = module.createPathMemory(emulator.getSvcMemory());
-            info.imageLoadAddress = UnidbgPointer.pointer(emulator, module.machHeader);
+            info.imageFilePath = (int) (UnidbgPointer.nativeValue(module.createPathMemory(emulator.getSvcMemory())));
+            info.imageLoadAddress = (int) module.machHeader;
             info.imageFileModDate = 0;
             info.pack();
             return info;
@@ -1825,7 +1811,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
         }
         try {
             FileIO file;
-            if (start == 0 && fd > 0 && (file = syscallHandler.fdMap.get(fd)) != null) {
+            if (start == 0 && fd > 0 && (file = syscallHandler.getFileIO(fd)) != null) {
                 long addr = allocateMapAddress(0, aligned);
                 if (log.isDebugEnabled()) {
                     log.debug("mmap2 addr=0x" + Long.toHexString(addr) + ", mmapBaseAddress=0x" + Long.toHexString(mmapBaseAddress));
@@ -1854,7 +1840,7 @@ public class MachOLoader extends AbstractLoader<DarwinFileIO> implements Memory,
                 } else {
                     log.warn("mmap2 MAP_FIXED not found mapped memory: start=0x" + Long.toHexString(start));
                 }
-                FileIO io = syscallHandler.fdMap.get(fd);
+                FileIO io = syscallHandler.getFileIO(fd);
                 if (io != null) {
                     return io.mmap2(emulator, start, aligned, prot, offset, length);
                 }

@@ -6,6 +6,7 @@ import com.github.unidbg.memory.SvcMemory;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.github.unidbg.pointer.UnidbgStructure;
 import com.github.unidbg.spi.InitFunctionListener;
+import com.github.unidbg.spi.LibraryFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -19,16 +20,22 @@ public abstract class Module {
     public final String name;
     public final long base;
     public final long size;
+    private final LibraryFile libraryFile;
     protected final Map<String, Module> neededLibraries;
     private final List<MemRegion> regions;
 
-    public Module(String name, long base, long size, Map<String, Module> neededLibraries, List<MemRegion> regions) {
+    public Module(String name, long base, long size, Map<String, Module> neededLibraries, List<MemRegion> regions, LibraryFile libraryFile) {
         this.name = name;
         this.base = base;
         this.size = size;
 
         this.neededLibraries = neededLibraries;
         this.regions = regions;
+        this.libraryFile = libraryFile;
+    }
+
+    public long getFileSize() {
+        return libraryFile == null ? 0 : libraryFile.getFileSize();
     }
 
     public long getBaseHeader() {
@@ -39,9 +46,9 @@ public abstract class Module {
         return regions;
     }
 
-    public abstract Number[] callFunction(Emulator<?> emulator, long offset, Object... args);
+    public abstract Number callFunction(Emulator<?> emulator, long offset, Object... args);
 
-    public final Number[] callFunction(Emulator<?> emulator, String symbolName, Object... args) {
+    public final Number callFunction(Emulator<?> emulator, String symbolName, Object... args) {
         Symbol symbol = findSymbolByName(symbolName, false);
         if (symbol == null) {
             throw new IllegalStateException("find symbol failed: " + symbolName);
@@ -135,7 +142,7 @@ public abstract class Module {
         return this.pathPointer;
     }
 
-    public static Number[] emulateFunction(Emulator<?> emulator, long address, Object... args) {
+    public static Number emulateFunction(Emulator<?> emulator, long address, Object... args) {
         List<Number> list = new ArrayList<>(args.length);
         for (Object arg : args) {
             if (arg instanceof String) {

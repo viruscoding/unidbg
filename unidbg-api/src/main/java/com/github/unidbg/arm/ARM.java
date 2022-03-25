@@ -11,8 +11,9 @@ import com.github.unidbg.Emulator;
 import com.github.unidbg.Module;
 import com.github.unidbg.Utils;
 import com.github.unidbg.arm.backend.Backend;
-import com.github.unidbg.arm.backend.BackendException;
+import com.github.unidbg.memory.MemRegion;
 import com.github.unidbg.memory.Memory;
+import com.github.unidbg.memory.SvcMemory;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.sun.jna.Pointer;
 import org.apache.commons.codec.binary.Hex;
@@ -872,8 +873,8 @@ public class ARM {
         return ((size - 1) / align + 1) * align;
     }
 
-    static String assembleDetail(Emulator<?> emulator, Instruction ins, long address, boolean thumb) {
-        return assembleDetail(emulator, ins, address, thumb, false);
+    static String assembleDetail(Emulator<?> emulator, Instruction ins, long address, boolean thumb, int maxLengthLibraryName) {
+        return assembleDetail(emulator, ins, address, thumb, false, maxLengthLibraryName);
     }
 
     private static void appendMemoryDetails32(Emulator<?> emulator, Instruction ins, capstone.api.arm.OpInfo opInfo, boolean thumb, StringBuilder sb) {
@@ -966,13 +967,13 @@ public class ARM {
         if (op.length == 2 &&
                 op[0].getType() == Arm64_const.ARM64_OP_REG &&
                 op[1].getType() == Arm64_const.ARM64_OP_MEM) {
-            if (op[0].getValue().getReg() >= Arm64_const.ARM64_REG_W0 && op[0].getValue().getReg() <= Arm64_const.ARM64_REG_W30) {
+            if (op[0].getValue().getUnicornReg() >= Arm64Const.UC_ARM64_REG_W0 && op[0].getValue().getUnicornReg() <= Arm64Const.UC_ARM64_REG_W30) {
                 bytesRead = 4;
             }
             mem = op[1].getValue().getMem();
 
             if (mem.getIndex() == 0) {
-                UnidbgPointer base = UnidbgPointer.register(emulator, mem.getBase());
+                UnidbgPointer base = UnidbgPointer.register(emulator, mem.getUnicornBaseReg());
                 long base_value = base == null ? 0L : base.peer;
                 addr = base_value + mem.getDisp();
             }
@@ -983,12 +984,12 @@ public class ARM {
                 op[0].getType() == Arm64_const.ARM64_OP_REG &&
                 op[1].getType() == Arm64_const.ARM64_OP_MEM &&
                 op[2].getType() == Arm64_const.ARM64_OP_IMM) {
-            if (op[0].getValue().getReg() >= Arm64_const.ARM64_REG_W0 && op[0].getValue().getReg() <= Arm64_const.ARM64_REG_W30) {
+            if (op[0].getValue().getUnicornReg() >= Arm64Const.UC_ARM64_REG_W0 && op[0].getValue().getUnicornReg() <= Arm64Const.UC_ARM64_REG_W30) {
                 bytesRead = 4;
             }
             mem = op[1].getValue().getMem();
             if (mem.getIndex() == 0) {
-                UnidbgPointer base = UnidbgPointer.register(emulator, mem.getBase());
+                UnidbgPointer base = UnidbgPointer.register(emulator, mem.getUnicornBaseReg());
                 addr = base == null ? 0L : base.peer;
                 addr += mem.getDisp();
             }
@@ -1010,46 +1011,51 @@ public class ARM {
         appendHex(builder, hex, width, placeholder, reverse);
     }
 
-    public static void appendHex(StringBuilder builder, String hex, int width, char placeholder, boolean reverse) {
+    public static void appendHex(StringBuilder builder, String str, int width, char placeholder, boolean reverse) {
         if (reverse) {
-            builder.append(hex);
-            for (int i = 0; i < width - hex.length(); i++) {
+            builder.append(str);
+            for (int i = 0; i < width - str.length(); i++) {
                 builder.append(placeholder);
             }
         } else {
-            for (int i = 0; i < width - hex.length(); i++) {
+            for (int i = 0; i < width - str.length(); i++) {
                 builder.append(placeholder);
             }
-            builder.append(hex);
+            builder.append(str);
         }
     }
 
-    public static String assembleDetail(Emulator<?> emulator, Instruction ins, long address, boolean thumb, boolean current) {
+    public static String assembleDetail(Emulator<?> emulator, Instruction ins, long address, boolean thumb, boolean current, int maxLengthLibraryName) {
+        SvcMemory svcMemory = emulator.getSvcMemory();
+        MemRegion region = svcMemory.findRegion(address);
         Memory memory = emulator.getMemory();
         char space = current ? '*' : ' ';
-        StringBuilder sb = new StringBuilder();
-        Module module = memory.findModuleByAddress(address);
-        String maxLengthSoName = memory.getMaxLengthLibraryName();
+        StringBuilder builder = new StringBuilder();
+        Module module = region != null ? null : memory.findModuleByAddress(address);
         if (module != null) {
-            sb.append('[');
-            appendHex(sb, module.name, maxLengthSoName.length(), ' ', true);
-            sb.append(space);
-            appendHex(sb, address - module.base + (thumb ? 1 : 0), Long.toHexString(memory.getMaxSizeOfLibrary()).length(), '0', false);
-            sb.append(']').append(space);
-        } else if (address >= 0xfffe0000L && maxLengthSoName != null) { // kernel
-            sb.append('[');
-            appendHex(sb, "0x" + Long.toHexString(address), maxLengthSoName.length(), ' ', true);
-            sb.append(space);
-            appendHex(sb, address - 0xfffe0000L + (thumb ? 1 : 0), Long.toHexString(memory.getMaxSizeOfLibrary()).length(), '0', false);
-            sb.append(']').append(space);
+            builder.append('[');
+            appendHex(builder, module.name, maxLengthLibraryName, ' ', true);
+            builder.append(space);
+            appendHex(builder, address - module.base + (thumb ? 1 : 0), Long.toHexString(memory.getMaxSizeOfLibrary()).length(), '0', false);
+            builder.append(']').append(space);
+        } else if (address >= svcMemory.getBase()) { // kernel
+            builder.append('[');
+            if (region == null) {
+                appendHex(builder, "0x" + Long.toHexString(address), maxLengthLibraryName, ' ', true);
+            } else {
+                appendHex(builder, region.getName().substring(0, Math.min(maxLengthLibraryName, region.getName().length())), maxLengthLibraryName, ' ', true);
+            }
+            builder.append(space);
+            appendHex(builder, address - svcMemory.getBase() + (thumb ? 1 : 0), Long.toHexString(memory.getMaxSizeOfLibrary()).length(), '0', false);
+            builder.append(']').append(space);
         }
-        sb.append("[");
-        appendHex(sb, Hex.encodeHexString(ins.getBytes()), 8, ' ', true);
-        sb.append("]");
-        sb.append(space);
-        appendHex(sb, ins.getAddress(), 8, '0', false);
-        sb.append(":").append(space);
-        sb.append('"').append(ins).append('"');
+        builder.append("[");
+        appendHex(builder, Hex.encodeHexString(ins.getBytes()), 8, ' ', true);
+        builder.append("]");
+        builder.append(space);
+        appendHex(builder, ins.getAddress(), 8, '0', false);
+        builder.append(":").append(space);
+        builder.append('"').append(ins).append('"');
 
         capstone.api.arm.OpInfo opInfo = null;
         capstone.api.arm64.OpInfo opInfo64 = null;
@@ -1060,13 +1066,13 @@ public class ARM {
             opInfo64 = (capstone.api.arm64.OpInfo) ins.getOperands();
         }
         if (current && (ins.getMnemonic().startsWith("ldr") || ins.getMnemonic().startsWith("str")) && opInfo != null) {
-            appendMemoryDetails32(emulator, ins, opInfo, thumb, sb);
+            appendMemoryDetails32(emulator, ins, opInfo, thumb, builder);
         }
         if (current && (ins.getMnemonic().startsWith("ldr") || ins.getMnemonic().startsWith("str")) && opInfo64 != null) {
-            appendMemoryDetails64(emulator, ins, opInfo64, sb);
+            appendMemoryDetails64(emulator, ins, opInfo64, builder);
         }
 
-        return sb.toString();
+        return builder.toString();
     }
 
     private static void appendAddrValue(StringBuilder sb, long addr, Memory memory, boolean is64Bit, int bytesRead) {
@@ -1125,14 +1131,14 @@ public class ARM {
                     sb.append(" (-0x").append(Integer.toHexString(-value)).append(")");
                 }
             }
-        } catch (BackendException exception) {
+        } catch (RuntimeException exception) {
             sb.append(" => ").append(exception.getMessage());
         }
     }
 
     private static final Log log = LogFactory.getLog(ARM.class);
 
-    static Arguments initArgs(Emulator<?> emulator, boolean padding, Number... arguments) {
+    public static void initArgs(Emulator<?> emulator, boolean padding, Number... arguments) {
         Backend backend = emulator.getBackend();
         Memory memory = emulator.getMemory();
 
@@ -1230,7 +1236,6 @@ public class ARM {
                 pointer.setInt(0, number.intValue());
             }
         }
-        return args;
     }
 
     public static UnidbgPointer adjust_ip(UnidbgPointer ip) {

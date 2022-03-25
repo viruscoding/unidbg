@@ -12,6 +12,9 @@ typedef struct unicorn {
   uc_engine *uc;
   jint singleStep;
   jboolean fastDebug;
+  uc_hook count_hook;
+  uint64_t emu_count;
+  uint64_t emu_counter;
 } *t_unicorn;
 
 struct new_hook {
@@ -34,5 +37,9 @@ void arm64eb_context_reg_read() {
 }
 void arm64eb_context_reg_write() {
   fprintf(stderr, "Unsupported arm64eb\n");
+  abort();
+}
+void ARM64_REGS_STORAGE_SIZE_aarch64eb() {
+  fprintf(stderr, "Unsupported aarch64eb\n");
   abort();
 }

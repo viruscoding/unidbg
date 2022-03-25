@@ -1,7 +1,5 @@
 package com.github.unidbg;
 
-import capstone.Arm64_const;
-import capstone.Arm_const;
 import capstone.api.Instruction;
 import capstone.api.RegsAccess;
 import com.alibaba.fastjson.util.IOUtils;
@@ -11,6 +9,7 @@ import com.github.unidbg.arm.backend.BackendException;
 import com.github.unidbg.arm.backend.CodeHook;
 import com.github.unidbg.arm.backend.UnHook;
 import com.github.unidbg.listener.TraceCodeListener;
+import com.github.unidbg.memory.Memory;
 
 import java.io.PrintStream;
 import java.util.Arrays;
@@ -24,22 +23,36 @@ public class AssemblyCodeDumper implements CodeHook, TraceHook {
 
     private final Emulator<?> emulator;
 
-    public AssemblyCodeDumper(Emulator<?> emulator) {
+    public AssemblyCodeDumper(Emulator<?> emulator, long begin, long end, TraceCodeListener listener) {
         super();
 
         this.emulator = emulator;
-    }
-
-    private boolean traceInstruction;
-    private long traceBegin, traceEnd;
-    private TraceCodeListener listener;
-
-    public void initialize(long begin, long end, TraceCodeListener listener) {
-        this.traceInstruction = true;
         this.traceBegin = begin;
         this.traceEnd = end;
         this.listener = listener;
+
+        Memory memory = emulator.getMemory();
+        if (begin > end) {
+            maxLengthLibraryName = memory.getMaxLengthLibraryName().length();
+        } else {
+            int value = 0;
+            for (Module module : memory.getLoadedModules()) {
+                long min = Math.max(begin, module.base);
+                long max = Math.min(end, module.base + module.size);
+                if (min < max) {
+                    int length = module.name.length();
+                    if (length > value) {
+                        value = length;
+                    }
+                }
+            }
+            maxLengthLibraryName = value;
+        }
     }
+
+    private final long traceBegin, traceEnd;
+    private final TraceCodeListener listener;
+    private final int maxLengthLibraryName;
 
     private UnHook unHook;
 
@@ -67,7 +80,7 @@ public class AssemblyCodeDumper implements CodeHook, TraceHook {
     }
 
     private boolean canTrace(long address) {
-        return traceInstruction && (traceBegin > traceEnd || (address >= traceBegin && address <= traceEnd));
+        return (traceBegin > traceEnd || (address >= traceBegin && address <= traceEnd));
     }
 
     private PrintStream redirect;
@@ -77,38 +90,34 @@ public class AssemblyCodeDumper implements CodeHook, TraceHook {
         this.redirect = redirect;
     }
 
+    private RegAccessPrinter lastInstructionWritePrinter;
+
     @Override
-    public void hook(final Backend backend, long address, int size, Object user) {
+    public void hook(final Backend backend, final long address, final int size, Object user) {
         if (canTrace(address)) {
             try {
-                PrintStream out = System.out;
+                PrintStream out = System.err;
                 if (redirect != null) {
                     out = redirect;
                 }
-                Instruction[] insns = emulator.printAssemble(out, address, size, new InstructionVisitor() {
+                Instruction[] insns = emulator.printAssemble(out, address, size, maxLengthLibraryName, new InstructionVisitor() {
+                    @Override
+                    public void visitLast(StringBuilder builder) {
+                        if (lastInstructionWritePrinter != null) {
+                            lastInstructionWritePrinter.print(emulator, backend, builder, address);
+                        }
+                    }
                     @Override
                     public void visit(StringBuilder builder, Instruction ins) {
                         RegsAccess regsAccess = ins.regsAccess();
-                        if (regsAccess == null) {
-                            return;
-                        }
-                        short[] regsRead = regsAccess.getRegsRead();
-                        for (short reg : regsRead) {
-                            if (emulator.is32Bit()) {
-                                if ((reg >= Arm_const.ARM_REG_R0 && reg <= Arm_const.ARM_REG_R12) ||
-                                        reg == Arm_const.ARM_REG_LR || reg == Arm_const.ARM_REG_SP) {
-                                    int value = backend.reg_read(reg).intValue();
-                                    builder.append(' ').append(ins.regName(reg)).append("=0x").append(Long.toHexString(value & 0xffffffffL));
-                                }
-                            } else {
-                                if ((reg >= Arm64_const.ARM64_REG_X0 && reg <= Arm64_const.ARM64_REG_X28) ||
-                                        (reg >= Arm64_const.ARM64_REG_X29 && reg <= Arm64_const.ARM64_REG_SP)) {
-                                    long value = backend.reg_read(reg).longValue();
-                                    builder.append(' ').append(ins.regName(reg)).append("=0x").append(Long.toHexString(value));
-                                } else if (reg >= Arm64_const.ARM64_REG_W0 && reg <= Arm64_const.ARM64_REG_W30) {
-                                    int value = backend.reg_read(reg).intValue();
-                                    builder.append(' ').append(ins.regName(reg)).append("=0x").append(Long.toHexString(value & 0xffffffffL));
-                                }
+                        if (regsAccess != null) {
+                            short[] regsRead = regsAccess.getRegsRead();
+                            RegAccessPrinter readPrinter = new RegAccessPrinter(address, ins, regsRead, false);
+                            readPrinter.print(emulator, backend, builder, address);
+
+                            short[] regWrite = regsAccess.getRegsWrite();
+                            if (regWrite.length > 0) {
+                                lastInstructionWritePrinter = new RegAccessPrinter(address + size, ins, regWrite, true);
                             }
                         }
                     }

@@ -1,6 +1,5 @@
 package com.github.unidbg.arm;
 
-import capstone.Capstone;
 import capstone.api.Disassembler;
 import capstone.api.DisassemblerFactory;
 import capstone.api.Instruction;
@@ -15,12 +14,13 @@ import com.github.unidbg.arm.backend.UnHook;
 import com.github.unidbg.arm.context.BackendArm64RegisterContext;
 import com.github.unidbg.arm.context.RegisterContext;
 import com.github.unidbg.debugger.Debugger;
-import com.github.unidbg.file.FileIO;
 import com.github.unidbg.file.NewFileIO;
 import com.github.unidbg.memory.Memory;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.github.unidbg.spi.Dlfcn;
 import com.github.unidbg.spi.SyscallHandler;
+import com.github.unidbg.thread.Entry;
+import com.github.unidbg.thread.Function64;
 import com.github.unidbg.unix.UnixSyscallHandler;
 import com.github.unidbg.unwind.SimpleARM64Unwinder;
 import com.github.unidbg.unwind.Unwinder;
@@ -48,7 +48,7 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
     protected final Memory memory;
     private final UnixSyscallHandler<T> syscallHandler;
 
-    public static final long LR = 0x7ffff0000L;
+    private static final long LR = 0x7ffff0000L;
 
     private final Dlfcn dlfcn;
 
@@ -59,8 +59,8 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
 
         backend.hook_add_new(new EventMemHook() {
             @Override
-            public boolean hook(Backend backend, long address, int size, long value, Object user) {
-                log.warn("memory failed: address=0x" + Long.toHexString(address) + ", size=" + size + ", value=0x" + Long.toHexString(value));
+            public boolean hook(Backend backend, long address, int size, long value, Object user, UnmappedType unmappedType) {
+                log.warn(unmappedType + " memory failed: address=0x" + Long.toHexString(address) + ", size=" + size + ", value=0x" + Long.toHexString(value));
                 if (LogFactory.getLog(AbstractEmulator.class).isDebugEnabled()) {
                     attach().debug();
                 }
@@ -91,7 +91,7 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
 
     private synchronized Disassembler createArm64Disassembler() {
         if (arm64DisassemblerCache == null) {
-            this.arm64DisassemblerCache = DisassemblerFactory.createDisassembler(Capstone.CS_ARCH_ARM64, Capstone.CS_MODE_ARM);
+            this.arm64DisassemblerCache = DisassemblerFactory.createArm64Disassembler();
             this.arm64DisassemblerCache.setDetail(true);
         }
         return arm64DisassemblerCache;
@@ -143,9 +143,7 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
 
     @Override
     protected void closeInternal() {
-        for (FileIO io : syscallHandler.fdMap.values()) {
-            io.close();
-        }
+        syscallHandler.destroy();
 
         IOUtils.close(arm64DisassemblerCache);
     }
@@ -181,9 +179,9 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
     }
 
     @Override
-    public Instruction[] printAssemble(PrintStream out, long address, int size, InstructionVisitor visitor) {
+    public Instruction[] printAssemble(PrintStream out, long address, int size, int maxLengthLibraryName, InstructionVisitor visitor) {
         Instruction[] insns = disassemble(address, size, 0);
-        printAssemble(out, insns, address, visitor);
+        printAssemble(out, insns, address, maxLengthLibraryName, visitor);
         return insns;
     }
 
@@ -201,18 +199,21 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
         return createArm64Disassembler().disasm(code, address, count);
     }
 
-    private void printAssemble(PrintStream out, Instruction[] insns, long address, InstructionVisitor visitor) {
-        StringBuilder sb = new StringBuilder();
+    private void printAssemble(PrintStream out, Instruction[] insns, long address, int maxLengthLibraryName, InstructionVisitor visitor) {
+        StringBuilder builder = new StringBuilder();
         for (Instruction ins : insns) {
-            sb.append(dateFormat.format(new Date())).append(" Trace Instruction ");
-            sb.append(ARM.assembleDetail(this, ins, address, false));
-            if (visitor != null) {
-                visitor.visit(sb, ins);
+            if(visitor != null) {
+                visitor.visitLast(builder);
             }
-            sb.append('\n');
+            builder.append('\n');
+            builder.append(dateFormat.format(new Date()));
+            builder.append(ARM.assembleDetail(this, ins, address, false, maxLengthLibraryName));
+            if (visitor != null) {
+                visitor.visit(builder, ins);
+            }
             address += ins.getSize();
         }
-        out.print(sb);
+        out.print(builder);
     }
 
     @Override
@@ -226,67 +227,27 @@ public abstract class AbstractARM64Emulator<T extends NewFileIO> extends Abstrac
     }
 
     @Override
-    public Number[] eFunc(long begin, Number... arguments) {
-        long spBackup = memory.getStackPoint();
-        try {
-            backend.reg_write(Arm64Const.UC_ARM64_REG_LR, LR);
-            final Arguments args = ARM.initArgs(this, isPaddingArgument(), arguments);
-            return eFunc(begin, args, LR, true);
-        } finally {
-            memory.setStackPoint(spBackup);
-        }
-    }
-
-    @Override
-    public void eInit(long begin, Number... arguments) {
-        long spBackup = memory.getStackPoint();
-        try {
-            backend.reg_write(Arm64Const.UC_ARM64_REG_LR, LR);
-            final Arguments args = ARM.initArgs(this, isPaddingArgument(), arguments);
-            eFunc(begin, args, LR, false);
-        } finally {
-            memory.setStackPoint(spBackup);
-        }
+    public Number eFunc(long begin, Number... arguments) {
+        return runMainForResult(new Function64(getPid(), begin, LR, isPaddingArgument(), arguments));
     }
 
     @Override
     public Number eEntry(long begin, long sp) {
-        long spBackup = memory.getStackPoint();
-        try {
-            memory.setStackPoint(sp);
-            backend.reg_write(Arm64Const.UC_ARM64_REG_LR, LR);
-            return emulate(begin, LR, timeout, true);
-        } finally {
-            memory.setStackPoint(spBackup);
-        }
+        return runMainForResult(new Entry(getPid(), begin, LR, sp));
     }
 
     @Override
-    public void eThread(long fn, long arg, long sp) {
-        backend.reg_write(Arm64Const.UC_ARM64_REG_X0, arg);
-        backend.reg_write(Arm64Const.UC_ARM64_REG_SP, sp);
-        emulate(fn, LR, timeout, false);
-    }
-
-    @Override
-    @Deprecated
-    public void eBlock(long begin, long until) {
-        long spBackup = memory.getStackPoint();
-        try {
-            backend.reg_write(Arm64Const.UC_ARM64_REG_LR, LR);
-            emulate(begin, until, timeout, true);
-        } finally {
-            memory.setStackPoint(spBackup);
-        }
-    }
-
-    @Override
-    protected Pointer getStackPointer() {
+    public Pointer getStackPointer() {
         return UnidbgPointer.register(this, Arm64Const.UC_ARM64_REG_SP);
     }
 
     @Override
     public Unwinder getUnwinder() {
         return new SimpleARM64Unwinder(this);
+    }
+
+    @Override
+    public long getReturnAddress() {
+        return LR;
     }
 }

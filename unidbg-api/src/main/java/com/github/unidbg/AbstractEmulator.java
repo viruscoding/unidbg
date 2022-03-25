@@ -2,9 +2,7 @@ package com.github.unidbg;
 
 import com.alibaba.fastjson.util.IOUtils;
 import com.github.unidbg.arm.ARMSvcMemory;
-import com.github.unidbg.arm.Arguments;
 import com.github.unidbg.arm.backend.Backend;
-import com.github.unidbg.arm.backend.BackendException;
 import com.github.unidbg.arm.backend.BackendFactory;
 import com.github.unidbg.arm.backend.ReadHook;
 import com.github.unidbg.arm.backend.WriteHook;
@@ -21,12 +19,15 @@ import com.github.unidbg.listener.TraceReadListener;
 import com.github.unidbg.listener.TraceSystemMemoryWriteListener;
 import com.github.unidbg.listener.TraceWriteListener;
 import com.github.unidbg.memory.Memory;
-import com.github.unidbg.memory.MemoryBlock;
-import com.github.unidbg.memory.MemoryBlockImpl;
 import com.github.unidbg.memory.SvcMemory;
 import com.github.unidbg.pointer.MemoryWriteListener;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.github.unidbg.spi.Dlfcn;
+import com.github.unidbg.thread.MainTask;
+import com.github.unidbg.thread.PopContextException;
+import com.github.unidbg.thread.ThreadContextSwitchException;
+import com.github.unidbg.thread.ThreadDispatcher;
+import com.github.unidbg.thread.UniThreadDispatcher;
 import com.github.unidbg.unix.UnixSyscallHandler;
 import com.github.unidbg.utils.Inspector;
 import com.sun.jna.Pointer;
@@ -44,11 +45,8 @@ import java.io.StringWriter;
 import java.lang.management.ManagementFactory;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Stack;
 
@@ -68,14 +66,6 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
     private final int pid;
 
     protected long timeout = DEFAULT_TIMEOUT;
-
-    private static final ThreadLocal<Emulator<?>> EMULATOR_THREAD_LOCAL = new ThreadLocal<>();
-    public static Emulator<?> getContextEmulator() {
-        return EMULATOR_THREAD_LOCAL.get();
-    }
-    public static void setContextEmulator(Emulator<?> emulator) {
-        EMULATOR_THREAD_LOCAL.set(emulator);
-    }
 
     private final RegisterContext registerContext;
 
@@ -110,10 +100,10 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
 
         String name = ManagementFactory.getRuntimeMXBean().getName();
         String pid = name.split("@")[0];
-        this.pid = Integer.parseInt(pid);
+        this.pid = Integer.parseInt(pid) & 0x7fff;
 
-        setContextEmulator(this);
         this.svcMemory = new ARMSvcMemory(svcBase, svcSize, this);
+        this.threadDispatcher = new UniThreadDispatcher(this);
 
         this.backend.onInitialize();
     }
@@ -168,27 +158,6 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
     protected abstract Dlfcn createDyld(SvcMemory svcMemory);
 
     protected abstract UnixSyscallHandler<T> createSyscallHandler(SvcMemory svcMemory);
-
-    @Override
-    @Deprecated
-    public void runAsm(String... asm) {
-        byte[] shellCode = assemble(Arrays.asList(asm));
-
-        if (shellCode.length < 2) {
-            throw new IllegalStateException("run asm failed");
-        }
-
-        long spBackup = getMemory().getStackPoint();
-        MemoryBlock block = MemoryBlockImpl.allocExecutable(getMemory(), shellCode.length);
-        UnidbgPointer pointer = block.getPointer();
-        pointer.write(0, shellCode, 0, shellCode.length);
-        try {
-            emulate(pointer.peer, pointer.peer + shellCode.length, 0, false);
-        } finally {
-            block.free();
-            getMemory().setStackPoint(spBackup);
-        }
-    }
 
     protected abstract byte[] assemble(Iterable<String> assembly);
 
@@ -319,8 +288,7 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
 
     @Override
     public TraceHook traceCode(long begin, long end, TraceCodeListener listener) {
-        AssemblyCodeDumper hook = new AssemblyCodeDumper(this);
-        hook.initialize(begin, end, listener);
+        AssemblyCodeDumper hook = new AssemblyCodeDumper(this, begin, end, listener);
         backend.hook_add_new(hook, begin, end, this);
         return hook;
     }
@@ -337,24 +305,56 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
         return running;
     }
 
+    private final ThreadDispatcher threadDispatcher;
+
+    @Override
+    public ThreadDispatcher getThreadDispatcher() {
+        return threadDispatcher;
+    }
+
+    @Override
+    public boolean emulateSignal(int sig) {
+        MainTask main = getSyscallHandler().createSignalHandlerTask(this, sig);
+        if (main == null) {
+            return false;
+        } else {
+            Memory memory = getMemory();
+            long spBackup = memory.getStackPoint();
+            try {
+                threadDispatcher.runMainForResult(main);
+            } finally {
+                memory.setStackPoint(spBackup);
+            }
+            return true;
+        }
+    }
+
+    protected final Number runMainForResult(MainTask task) {
+        Memory memory = getMemory();
+        long spBackup = memory.getStackPoint();
+        try {
+            return getThreadDispatcher().runMainForResult(task);
+        } finally {
+            memory.setStackPoint(spBackup);
+        }
+    }
+
     /**
-     * Emulate machine code in a specific duration of time.
-     * @param begin    Address where emulation starts
-     * @param until    Address where emulation stops (i.e when this address is hit)
-     * @param timeout  Duration to emulate the code (in microseconds). When this value is 0, we will emulate the code in infinite time, until the code is finished.
+     * @return <code>null</code>表示执行未完成，需要线程调度
      */
-    protected final Number emulate(long begin, long until, long timeout, boolean entry) {
+    public final Number emulate(long begin, long until) throws PopContextException {
         if (running) {
             backend.emu_stop();
             throw new IllegalStateException("running");
+        }
+        if (is32Bit()) {
+            begin &= 0xffffffffL;
         }
 
         final Pointer pointer = UnidbgPointer.pointer(this, begin);
         long start = 0;
         Thread exitHook = null;
         try {
-            setContextEmulator(this);
-
             if (log.isDebugEnabled()) {
                 log.debug("emulate " + pointer + " started sp=" + getStackPointer());
             }
@@ -364,6 +364,7 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
                 exitHook = new Thread() {
                     @Override
                     public void run() {
+                        backend.emu_stop();
                         Debugger debugger = attach();
                         if (!debugger.isDebugging()) {
                             debugger.debug();
@@ -372,7 +373,7 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
                 };
                 Runtime.getRuntime().addShutdownHook(exitHook);
             }
-            backend.emu_start(begin, until, timeout, 0);
+            backend.emu_start(begin, until, 0, 0);
             if (is64Bit()) {
                 return backend.reg_read(Arm64Const.UC_ARM64_REG_X0);
             } else {
@@ -380,26 +381,16 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
                 Number r1 = backend.reg_read(ArmConst.UC_ARM_REG_R1);
                 return (r0.intValue() & 0xffffffffL) | ((r1.intValue() & 0xffffffffL) << 32);
             }
+        } catch (ThreadContextSwitchException e) {
+            e.syncReturnValue(this);
+            if (log.isTraceEnabled()) {
+                e.printStackTrace();
+            }
+            return null;
         } catch (PopContextException e) {
-            int off = popContext();
-            long pc = backend.reg_read(is32Bit() ? ArmConst.UC_ARM_REG_PC : Arm64Const.UC_ARM64_REG_PC).longValue();
-            if (is32Bit()) {
-                pc &= 0xffffffffL;
-            }
-            try {
-                backend.emu_start(pc + off, until, timeout, 0);
-                if (is64Bit()) {
-                    return backend.reg_read(Arm64Const.UC_ARM64_REG_X0);
-                } else {
-                    Number r0 = backend.reg_read(ArmConst.UC_ARM_REG_R0);
-                    Number r1 = backend.reg_read(ArmConst.UC_ARM_REG_R1);
-                    return (r0.intValue() & 0xffffffffL) | ((r1.intValue() & 0xffffffffL) << 32);
-                }
-            } catch (RuntimeException exception) {
-                return handleEmuException(exception, entry, pointer, start);
-            }
+            throw e;
         } catch (RuntimeException e) {
-            return handleEmuException(e, entry, pointer, start);
+            return handleEmuException(e, pointer, start);
         } finally {
             if (exitHook != null) {
                 Runtime.getRuntime().removeShutdownHook(exitHook);
@@ -412,23 +403,22 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
         }
     }
 
-    private int handleEmuException(RuntimeException e, boolean entry, Pointer pointer, long start) {
-        if (!entry && e instanceof BackendException && !log.isDebugEnabled()) {
-            log.warn("emulate " + pointer + " failed: sp=" + getStackPointer() + ", offset=" + (System.currentTimeMillis() - start) + "ms", e);
-            return -1;
-        }
-
+    private int handleEmuException(RuntimeException e, Pointer pointer, long start) {
         boolean enterDebug = log.isDebugEnabled();
-        if (enterDebug) {
+        if (enterDebug || !log.isWarnEnabled()) {
             e.printStackTrace();
             attach().debug();
         } else {
-            log.warn("emulate " + pointer + " exception sp=" + getStackPointer() + ", msg=" + e.getMessage() + ", offset=" + (System.currentTimeMillis() - start) + "ms");
+            String msg = e.getMessage();
+            if (msg == null) {
+                msg = e.getClass().getName();
+            }
+            log.warn("emulate " + pointer + " exception sp=" + getStackPointer() + ", msg=" + msg + ", offset=" + (System.currentTimeMillis() - start) + "ms");
         }
         return -1;
     }
 
-    protected abstract Pointer getStackPointer();
+    public abstract Pointer getStackPointer();
 
     private boolean closed;
 
@@ -461,18 +451,6 @@ public abstract class AbstractEmulator<T extends NewFileIO> implements Emulator<
     @Override
     public String getProcessName() {
         return processName == null ? "unidbg" : processName;
-    }
-
-    protected final Number[] eFunc(long begin, Arguments args, long lr, boolean entry) {
-        long sp = getMemory().getStackPoint();
-        int alignment = is64Bit() ? 16 : 8;
-        if (sp % alignment != 0) {
-            log.info("SP NOT " + alignment + " byte aligned", new Exception(getStackPointer().toString()));
-        }
-        final List<Number> numbers = new ArrayList<>(10);
-        numbers.add(emulate(begin, lr, timeout, entry));
-        numbers.addAll(args.pointers);
-        return numbers.toArray(new Number[0]);
     }
 
     private final Map<String, Object> context = new HashMap<>();
