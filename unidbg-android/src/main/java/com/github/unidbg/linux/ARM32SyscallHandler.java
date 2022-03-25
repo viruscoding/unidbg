@@ -1490,7 +1490,7 @@ public class ARM32SyscallHandler extends AndroidSyscallHandler {
         return new LocalSocketIO(emulator, sdk);
     }
 
-    private int socket(Backend backend, Emulator<?> emulator) {
+    protected int socket(Backend backend, Emulator<?> emulator) {
         int domain = backend.reg_read(ArmConst.UC_ARM_REG_R0).intValue();
         int type = backend.reg_read(ArmConst.UC_ARM_REG_R1).intValue() & 0x7ffff;
         int protocol = backend.reg_read(ArmConst.UC_ARM_REG_R2).intValue();
