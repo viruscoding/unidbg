@@ -4,6 +4,7 @@ import com.github.unidbg.Emulator;
 import com.github.unidbg.Module;
 import com.github.unidbg.Symbol;
 import com.github.unidbg.ios.struct.objc.ObjcClass;
+import com.github.unidbg.ios.struct.objc.ObjcObject;
 import com.github.unidbg.pointer.UnidbgPointer;
 import com.sun.jna.Pointer;
 
@@ -18,6 +19,7 @@ class ObjcImpl extends ObjC {
     private final Symbol _objc_lookUpClass;
     private final Symbol _sel_registerName;
     private final Symbol _class_getMethodImplementation;
+    private final Symbol _class_respondsToSelector;
 
     public ObjcImpl(Emulator<?> emulator) {
         this.emulator = emulator;
@@ -54,6 +56,11 @@ class ObjcImpl extends ObjC {
         _class_getMethodImplementation = module.findSymbolByName("_class_getMethodImplementation", false);
         if (_class_getMethodImplementation == null) {
             throw new IllegalStateException("_class_getMethodImplementation is null");
+        }
+
+        _class_respondsToSelector = module.findSymbolByName("_class_respondsToSelector", false);
+        if (_class_respondsToSelector == null) {
+            throw new IllegalStateException("_class_respondsToSelector is null");
         }
     }
 
@@ -95,6 +102,13 @@ class ObjcImpl extends ObjC {
     }
 
     @Override
+    public boolean respondsToSelector(ObjcClass objcClass, String selectorName) {
+        Pointer selector = registerName(selectorName);
+        Number number = _class_respondsToSelector.call(emulator, objcClass, selector);
+        return number.intValue() == 1;
+    }
+
+    @Override
     public UnidbgPointer getMethodImplementation(ObjcClass objcClass, String selectorName) {
         Pointer selector = registerName(selectorName);
         Number number = _class_getMethodImplementation.call(emulator, objcClass, selector);
@@ -108,5 +122,32 @@ class ObjcImpl extends ObjC {
     @Override
     public Number msgSend(Emulator<?> emulator, Object... args) {
         return _objc_msgSend.call(emulator, args);
+    }
+
+    private ObjcClass cNSString;
+    private ObjcClass cNSData;
+
+    @Override
+    public NSString newString(String str) {
+        if (str == null) {
+            return null;
+        }
+        if (cNSString == null) {
+            cNSString = getClass("NSString");
+        }
+        ObjcObject obj = cNSString.callObjc("stringWithUTF8String:", str);
+        return NSString.create(obj);
+    }
+
+    @Override
+    public NSData newData(byte[] bytes) {
+        if (bytes == null) {
+            return null;
+        }
+        if (cNSData == null) {
+            cNSData = getClass("NSData");
+        }
+        ObjcObject obj = cNSData.callObjc("dataWithBytes:length:", bytes, bytes.length);
+        return NSData.create(obj);
     }
 }

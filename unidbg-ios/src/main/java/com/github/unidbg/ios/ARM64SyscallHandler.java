@@ -70,6 +70,7 @@ import com.github.unidbg.ios.struct.kernel.TaskInfoRequest;
 import com.github.unidbg.ios.struct.kernel.TaskSetExceptionPortsReply;
 import com.github.unidbg.ios.struct.kernel.TaskSetExceptionPortsRequest;
 import com.github.unidbg.ios.struct.kernel.TaskThreadsReply64;
+import com.github.unidbg.ios.struct.kernel.TaskVmInfoReply64;
 import com.github.unidbg.ios.struct.kernel.ThreadBasicInfoReply;
 import com.github.unidbg.ios.struct.kernel.ThreadInfoRequest;
 import com.github.unidbg.ios.struct.kernel.ThreadStateReply64;
@@ -88,6 +89,7 @@ import com.github.unidbg.ios.struct.sysctl.IfMsgHeader;
 import com.github.unidbg.ios.struct.sysctl.KInfoProc64;
 import com.github.unidbg.ios.struct.sysctl.SockAddrDL;
 import com.github.unidbg.ios.struct.sysctl.TaskDyldInfo;
+import com.github.unidbg.ios.struct.sysctl.TaskVmInfo64;
 import com.github.unidbg.memory.MemoryMap;
 import com.github.unidbg.memory.SvcMemory;
 import com.github.unidbg.pointer.UnidbgPointer;
@@ -362,6 +364,9 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                     return;
                 case 89:
                     backend.reg_write(Arm64Const.UC_ARM64_REG_X0, getdtablesize());
+                    return;
+                case 90:
+                    backend.reg_write(Arm64Const.UC_ARM64_REG_X0, dup2(emulator));
                     return;
                 case 92:
                 case 406: // fcntl_NOCANCEL
@@ -2940,6 +2945,29 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
                     }
                     return MACH_MSG_SUCCESS;
                 }
+                if (args.flavor == TaskInfoRequest.TASK_VM_INFO) {
+                    TaskVmInfoReply64 reply = new TaskVmInfoReply64(request);
+                    reply.unpack();
+
+                    header.setMsgBits(false);
+                    header.msgh_size = header.size() + reply.size();
+                    header.msgh_remote_port = header.msgh_local_port;
+                    header.msgh_local_port = 0;
+                    header.msgh_id += 100; // reply Id always equals reqId+100
+                    header.pack();
+
+                    reply.retCode = 0;
+                    reply.task_info_outCnt = UnidbgStructure.calculateSize(TaskVmInfo64.class) / 4;
+                    reply.vmInfo.virtual_size = 0x100000000L;
+                    reply.vmInfo.region_count = emulator.getMemory().getMemoryMap().size();
+                    reply.vmInfo.page_size = emulator.getPageAlign();
+                    reply.pack();
+
+                    if (log.isDebugEnabled()) {
+                        log.debug("task_info TASK_VM_INFO reply=" + reply);
+                    }
+                    return MACH_MSG_SUCCESS;
+                }
                 throw new UnsupportedOperationException("flavor=" + args.flavor);
             }
             case 78: { // _dispatch_send_wakeup_runloop_thread
@@ -3334,6 +3362,32 @@ public class ARM64SyscallHandler extends DarwinSyscallHandler {
         Pointer act = context.getPointerArg(1);
         Pointer oldact = context.getPointerArg(2);
         return sigaction(emulator, signum, act, oldact);
+    }
+
+    private int dup2(Emulator<?> emulator) {
+        RegisterContext context = emulator.getContext();
+        int oldfd = context.getIntArg(0);
+        int newfd = context.getIntArg(1);
+        if (log.isDebugEnabled()) {
+            log.debug("dup2 oldfd=" + oldfd + ", newfd=" + newfd);
+        }
+
+        FileIO old = fdMap.get(oldfd);
+        if (old == null) {
+            emulator.getMemory().setErrno(UnixEmulator.EBADF);
+            return -1;
+        }
+
+        if (oldfd == newfd) {
+            return newfd;
+        }
+        DarwinFileIO _new = fdMap.remove(newfd);
+        if (_new != null) {
+            _new.close();
+        }
+        _new = (DarwinFileIO) old.dup2();
+        fdMap.put(newfd, _new);
+        return newfd;
     }
 
     private int fcntl(Emulator<?> emulator) {
